@@ -77,18 +77,18 @@ save_CDSfasta_from_xms(xms, nameFile = "data/mads_cds")
 targets <-ca_mads
 
 # Characterize the gene family table
-char_w_iso <- characterizeTable(targets)
+tdat <- characterizeTable(targets)
 
-              # Sort the data set by chromosome and start coordinate
+# Sort the data set by chromosome and start coordinate
 tdat %>% 
   arrange(Chr, chr_s)
 
-# Create a data set based on 1 gene model / locus
+# Create a data set based on the model 1 gene / locus
 tdat %>% 
   arrange(Chr, chr_s) %>% 
   distinct(LOC, .keep_all = TRUE)
 
-# Get information on isoforms: number of loci with more than 1 protein
+# number of loci with more than 1 protein
 tdat %>% 
   arrange(LOC, desc(AA)) %>% 
   count(LOC, sort = TRUE) %>% 
@@ -100,27 +100,81 @@ nisof <- tdat %>%
   count(LOC) %>% 
   pull(n)
 
-# Update 'tdat' with the count of isoforms
+# Update with the count of isoforms
 tdat <- tdat %>%  
   arrange(LOC, desc(AA)) %>% 
   distinct(LOC, .keep_all = TRUE) %>% 
   mutate(n_isof = nisof)
 
-# Extract the LOC column from 'char_w_iso' and store it in 'loc'
-loc <- Char_w_iso %>%  
-    as_tibble() %>% 
-    pull(LOC)
-
-# Create a new table 'unique_char_tab' by grouping 'char_w_iso' by LOC and selecting the first entry in each group (the biggest isoform)
-unique_char_tab <- char_w_iso %>%  
-  as_tibble() %>% 
-  group_by(LOC) %>%
-  dplyr::slice(1) %>% 
-  ungroup()
-              
-
- 
- 
+# Write the gene family table to a CSV file
+write.csv(tdat, file = "data/char_table.csv")
 
 
+#                    GRanges object
 
+# Negative widths are not allowed by IRanges, so let's define the true 
+# coordinates and build a new data frame, which is the input for the function 
+# 'makeGRangesFromDataFrame'
+
+BiocManager::install("GenomicRanges")
+library(GenomicRanges)
+
+# Create a data frame 'gr' by transforming and modifying columns from 'tdat'
+gr <- tdat %>% 
+  transmute(LOC, Chr, Strand, 
+            Coordstart = ifelse(Strand == "-", chr_e, chr_s),
+            Coordend = ifelse(Strand == "+", chr_e, chr_s))
+
+# Add a new column 'bp_cut' to map the TSS coordinate for promoter analysis
+# Customize 'bp_cut' based on specific LOC values
+gr <- gr %>% 
+  dplyr::mutate(bp_cut = 150) %>% 
+  dplyr::mutate(bp_cut = ifelse(LOC == "LOC101493118", 14, bp_cut), 
+                bp_cut = ifelse(LOC == "LOC101504656", 27, bp_cut), 
+                bp_cut = ifelse(LOC == "LOC101509413", 3,  bp_cut), 
+                bp_cut = ifelse(LOC == "LOC101510075", 39, bp_cut))
+
+# Create a GRanges object from the modified 'gr' data frame
+gr <- makeGRangesFromDataFrame(gr, start.field = "Coordstart", 
+                               end.field = "Coordend", 
+                               strand.field = "Strand", ignore.strand = FALSE, 
+                               seqnames.field = "Chr", 
+                               keep.extra.columns = TRUE)
+
+# Add genome information to the GRanges object
+genome(gr) = "ASM33114v1"
+
+# Filter out unplaced sequences 
+gr <- gr[seqnames(gr) != "Un"]
+
+
+# Order the 'GRanges' object by chromosome and region location
+sort(table(seqnames(gr)), decreasing = TRUE)
+gr <- sort(gr)
+              #     Promoter sequence 
+
+
+library(Biostrings)
+
+
+# Load mRNA sequences and convert them into a DNAStringSet
+mads_cds = readDNAStringSet("data/mads_cds.fasta")
+
+# Convert sequence names to LOC names
+my_names = names(mads_cds)
+my_names <- sapply(my_names, function(i) names2LOC(i), USE.NAMES = FALSE)
+names(mads_cds) = my_names
+
+# Load the Cicer arietinum genome from the 'BSgenome' package
+library(BSgenome.Carietinum.NCBI.v1)
+genome = BSgenome.Carietinum.NCBI.v1
+
+# Create a GRangesList object containing TSS coordinates for each chromosome
+gr.tss = GRangesList(sapply(paste0("Ca", 1:8), function(i) TSScoordinates(gr, mads_cds, i)))
+gr.tss = unlist(gr.tss)
+
+# Save objects including 'seqs', 'gr', and 'gr.tss'
+save(seqs, gr, gr.tss, file = "res/sequences.rda")
+
+# Extract promoters (1500 nt upstream and 9 nt downstream of TSS)
+gr.promoters = promoters(gr.tss, upstream=1500, downstream=9)
